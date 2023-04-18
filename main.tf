@@ -64,17 +64,40 @@ resource "aws_ecs_service" "nginx_service" {
     subnets = [aws_subnet.nginx_subnet_public.id, aws_subnet.nginx_subnet_private.id]
     assign_public_ip = true
   }
+  load_balancer {
+    target_group_arn = aws_lb_target_group.nginx.arn
+    container_name   = "nginx"
+    container_port   = 80
+  }
+}
+
+# Create a security group for the ALB
+resource "aws_security_group" "alb" {
+  name_prefix = "alb-sg"
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 }
 
 # Create an Application Load Balancer
 resource "aws_lb" "nginx_lb" {
   name = "nginx-lb"
   subnets = [aws_subnet.nginx_subnet_public.id]
+  load_balancer_type = "application"
   security_groups = [aws_security_group.nginx_lb_security_group.id]
+  enable_deletion_protection = true
   internal = false
 
   tags = {
     Name = "nginx-lb"
+  }
+  access_logs {
+    bucket  = "my-lb-logs-bucket"
+    prefix  = "nginx-lb"
+    enabled = true
   }
 }
 
@@ -119,4 +142,88 @@ resource "aws_cloudtrail" "nginx_cloudtrail" {
   name = "nginx-cloudtrail"
   s3_bucket_name = "my-cloudtrail-bucket"
   include_global_service_events = true
+}
+
+# Define the CloudFront distribution resource
+resource "aws_cloudfront_distribution" "my_distribution" {
+  origin {
+    domain_name = aws_lb.nginx.dns_name
+    origin_id   = "nginx-lb"
+  }
+
+  default_cache_behavior {
+    allowed_methods  = ["GET", "HEAD", "OPTIONS"]
+    cached_methods   = ["GET", "HEAD", "OPTIONS"]
+    target_origin_id = "nginx-lb"
+
+    forwarded_values {
+      query_string = false
+
+      cookies {
+        forward = "none"
+      }
+    }
+
+    viewer_protocol_policy = "redirect-to-https"
+  }
+
+  enabled             = true
+  is_ipv6_enabled     = true
+  default_root_object = "index.html"
+
+  aliases = ["example.com"]
+
+  price_class = "PriceClass_All"
+
+  viewer_certificate {
+    acm_certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    minimum_protocol_version = "TLSv1.2_2018"
+    ssl_support_method = "sni-only"
+  }
+  # Define the WAF web acl association with the CloudFront distribution
+  web_acl_id = aws_wafv2_web_acl.my_web_acl.id
+}
+
+# Define the WAF web acl resource
+resource "aws_wafv2_web_acl" "my_web_acl" {
+  name        = "my-web-acl"
+  description = "My Web ACL"
+  scope       = "REGIONAL"
+
+  default_action {
+    block {}
+  }
+
+  rule {
+    name     = "awsManagedRulesCommonRuleSet"
+    priority = 1
+    action {
+      allow {}
+    }
+    override_action = true
+  }
+
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    metric_name                 = "MyWebACL"
+    sampled_requests_enabled   = true
+  }
+}
+
+# Define the Route53 record resource
+resource "aws_route53_record" "my_record" {
+  zone_id = "Z1XXXXXXXXXXXX"
+  name    = "creditorwatch.com"
+  type    = "A"
+
+  alias {
+    name                   = aws_cloudfront_distribution.my_distribution.domain_name
+    zone_id                = aws_cloudfront_distribution.my_distribution.hosted_zone_id
+    evaluate_target_health = false
+  }
+}
+
+# Output the route53 domain name to access public nginx 
+output "route53_domain_name" {
+  value = aws_route53_record.my_record.name
 }
